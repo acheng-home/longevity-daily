@@ -5,32 +5,33 @@ Automatically fetches latest news and sends formatted email report
 """
 
 import os
-import json
+import time
 import requests
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 # Configuration
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 EMAIL_TO = os.environ.get("EMAIL_TO", "acheng@ifree8.com")
-EMAIL_FROM = "Longevity Daily <daily@resend.dev>"
 
-# Search queries for different categories
+# Resend requires verified domain, use onboarding domain for testing
+# After adding your own domain in Resend, change this
+EMAIL_FROM = "Longevity Daily <onboarding@resend.dev>"
+
+# Search queries - reduced to avoid rate limiting
 SEARCH_QUERIES = [
-    {"query": "longevity research 2026 latest", "category": "longevity_research"},
-    {"query": "Bryan Johnson Blueprint longevity", "category": "influencer"},
-    {"query": "NMN NAD+ supplement study", "category": "supplements"},
-    {"query": "rapamycin anti-aging clinical trial", "category": "research"},
-    {"query": "biohacking trends 2026", "category": "biohacking"},
-    {"query": "Huberman Lab podcast latest", "category": "podcast"},
-    {"query": "Peter Attia longevity", "category": "podcast"},
-    {"query": "Reddit biohackers longevity", "category": "community"},
+    {"query": "longevity anti-aging research 2026", "category": "longevity_research"},
+    {"query": "NMN NAD rapamycin supplement", "category": "supplements"},
+    {"query": "biohacking health optimization", "category": "biohacking"},
+    {"query": "Huberman Peter Attia podcast", "category": "podcast"},
 ]
+
+# Request delay to avoid rate limiting (seconds)
+REQUEST_DELAY = 1.5
 
 
 def search_brave(query: str, count: int = 5) -> list:
-    """Search using Brave Search API"""
+    """Search using Brave Search API with rate limiting"""
     if not BRAVE_API_KEY:
         print(f"Warning: No Brave API key, skipping search for: {query}")
         return []
@@ -43,11 +44,18 @@ def search_brave(query: str, count: int = 5) -> list:
     params = {
         "q": query,
         "count": count,
-        "freshness": "pd"  # Past day
+        "freshness": "pw"  # Past week (more results than pd)
     }
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=30)
+
+        # Handle rate limiting
+        if response.status_code == 429:
+            print(f"Rate limited, waiting 5 seconds...")
+            time.sleep(5)
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+
         response.raise_for_status()
         data = response.json()
 
@@ -67,15 +75,20 @@ def search_brave(query: str, count: int = 5) -> list:
 
 
 def fetch_all_news() -> dict:
-    """Fetch news from all categories"""
+    """Fetch news from all categories with delays"""
     all_results = {}
 
-    for item in SEARCH_QUERIES:
+    for i, item in enumerate(SEARCH_QUERIES):
         query = item["query"]
         category = item["category"]
         print(f"Searching: {query}")
+
         results = search_brave(query, count=5)
         all_results[category] = results
+
+        # Add delay between requests to avoid rate limiting
+        if i < len(SEARCH_QUERIES) - 1:
+            time.sleep(REQUEST_DELAY)
 
     return all_results
 
@@ -90,8 +103,7 @@ def generate_html_report(news_data: dict) -> str:
     weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday = weekday_map[now.weekday()]
 
-    # Build news items HTML
-    def build_news_section(items: list, limit: int = 3) -> str:
+    def build_news_section(items: list, limit: int = 4) -> str:
         if not items:
             return "<p style='color:#999;font-size:13px;'>暂无最新内容</p>"
 
@@ -114,7 +126,6 @@ def generate_html_report(news_data: dict) -> str:
 
         return "".join(html_parts)
 
-    # Main HTML template
     html = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -135,13 +146,8 @@ def generate_html_report(news_data: dict) -> str:
 </div>
 
 <div style="margin-bottom:25px;">
-<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">补剂与NAD+研究</div>
+<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">补剂与临床研究</div>
 {build_news_section(news_data.get("supplements", []))}
-</div>
-
-<div style="margin-bottom:25px;">
-<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">临床试验进展</div>
-{build_news_section(news_data.get("research", []))}
 </div>
 
 <div style="margin-bottom:25px;">
@@ -150,18 +156,8 @@ def generate_html_report(news_data: dict) -> str:
 </div>
 
 <div style="margin-bottom:25px;">
-<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">KOL动态</div>
-{build_news_section(news_data.get("influencer", []))}
-</div>
-
-<div style="margin-bottom:25px;">
-<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">播客推荐</div>
+<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">播客与KOL动态</div>
 {build_news_section(news_data.get("podcast", []))}
-</div>
-
-<div style="margin-bottom:25px;">
-<div style="color:#10b981;font-size:16px;font-weight:bold;border-left:4px solid #10b981;padding-left:12px;margin-bottom:15px;">社区热议</div>
-{build_news_section(news_data.get("community", []))}
 </div>
 
 <div style="background:#fef3c7;border-radius:8px;padding:15px;margin:25px 0;">
@@ -219,10 +215,20 @@ def send_email_resend(to_email: str, subject: str, html_content: str) -> bool:
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
+
+        # Debug: print response for troubleshooting
+        if response.status_code != 200:
+            print(f"Response status: {response.status_code}")
+            print(f"Response body: {response.text}")
+
         response.raise_for_status()
         result = response.json()
         print(f"Email sent successfully! ID: {result.get('id')}")
         return True
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error: {e}")
+        print(f"Response: {e.response.text if e.response else 'No response'}")
+        return False
     except Exception as e:
         print(f"Failed to send email: {e}")
         return False
@@ -234,13 +240,17 @@ def main():
     print("Longevity Daily Report Generator")
     print("=" * 50)
 
-    # Check required environment variables
-    if not BRAVE_API_KEY:
-        print("Warning: BRAVE_API_KEY not set, using fallback content")
+    # Debug: show configuration
+    print(f"\nConfiguration:")
+    print(f"  BRAVE_API_KEY: {'Set' if BRAVE_API_KEY else 'NOT SET'}")
+    print(f"  RESEND_API_KEY: {'Set' if RESEND_API_KEY else 'NOT SET'}")
+    print(f"  EMAIL_TO: {EMAIL_TO}")
+    print(f"  EMAIL_FROM: {EMAIL_FROM}")
 
     if not RESEND_API_KEY:
-        print("Error: RESEND_API_KEY not set, cannot send email")
-        return
+        print("\nError: RESEND_API_KEY not set, cannot send email")
+        print("Please add RESEND_API_KEY to GitHub Secrets")
+        exit(1)
 
     # Fetch news
     print("\n[1/3] Fetching latest news...")
