@@ -2,7 +2,8 @@ name: Longevity Daily Report
 
 on:
   schedule:
-    - cron: '15 11 * * *'
+    # Bug 4 修复：UTC 00:00 = 北京时间 08:00，每天早上8点发送
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -25,7 +26,8 @@ jobs:
 
       - name: Run daily report script
         env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          BRAVE_API_KEY:  ${{ secrets.BRAVE_API_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
         run: python send_daily_report.py
