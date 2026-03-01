@@ -4,7 +4,7 @@ Longevity & Biohacking Daily Report
 数据源：Brave + Reddit + PubMed + EuropePMC + OpenAlex + S2 + HN + RSS
 """
 
-import os, time, html as H, xml.etree.ElementTree as ET
+import os, time, html as H, xml.etree.ElementTree as ET, threading
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
@@ -15,11 +15,14 @@ from langdetect import detect, LangDetectException, DetectorFactory
 
 DetectorFactory.seed = 0
 
+# Brave 并发限制：同时最多 3 个请求，避免 12 并发触发 429
+_brave_sem = threading.Semaphore(3)
+
 # ── 配置 ──────────────────────────────────────────────────────
 BRAVE_KEY  = os.environ.get("BRAVE_API_KEY")
 RESEND_KEY = os.environ.get("RESEND_API_KEY")
 EMAIL_TO   = os.environ.get("EMAIL_TO",   "acheng@ifree8.com")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "Longevity Daily <onboarding@resend.dev>")
+EMAIL_FROM = os.environ.get("EMAIL_FROM") or "Longevity Daily <onboarding@resend.dev>"
 YEAR       = datetime.now().year
 
 # ── 搜索分类 ──────────────────────────────────────────────────
@@ -99,20 +102,13 @@ HN_SOURCES = [
 
 # ── RSS 订阅（学术期刊+专业博客+播客+YouTube，免费，无需Key） ─
 RSS_SOURCES = [
-    # 学术期刊
+    # 学术期刊（已验证可用）
     ("https://www.nature.com/nataging.rss",                                               "长寿研究前沿"),
-    ("https://longevity.technology/feed/",                                                "长寿研究前沿"),
     ("https://onlinelibrary.wiley.com/action/showFeed?jc=14749726&type=etoc&feed=rss",   "长寿研究前沿"),
-    ("https://www.cell.com/cell-metabolism/inprogress.rss",                               "代谢健康"),
-    ("https://www.foundmyfitness.com/feed",                                               "补剂与临床研究"),
-    # 播客 RSS（无需Key）
+    # 播客 RSS（已验证可用）
     ("https://feeds.megaphone.fm/hubermanlab",                                            "播客与KOL动态"),
-    ("https://peterattiamd.com/feed/podcast",                                             "播客与KOL动态"),
-    ("https://feeds.simplecast.com/bpvhNAV3",                                             "播客与KOL动态"),  # Lifespan w/ Sinclair
-    # YouTube 频道 Atom Feed（无需Key，公开可用）
-    ("https://www.youtube.com/feeds/videos.xml?channel_id=UC2D2CMWXMOVWx7giW1n3LIg",    "播客与KOL动态"),  # Huberman Lab
-    ("https://www.youtube.com/feeds/videos.xml?channel_id=UCkVLLl5bkCrHFsHMBWMNy4w",    "播客与KOL动态"),  # Peter Attia MD
-    ("https://www.youtube.com/feeds/videos.xml?channel_id=UCmKfRbykvEutdcCpbMD4KeA",    "播客与KOL动态"),  # Bryan Johnson
+    # YouTube 频道 Atom Feed（Huberman Lab，无需Key）
+    ("https://www.youtube.com/feeds/videos.xml?channel_id=UC2D2CMWXMOVWx7giW1n3LIg",    "播客与KOL动态"),
     # 健康科技博客 RSS
     ("https://ouraring.com/blog/feed/",                                                   "健康科技与可穿戴"),
 ]
@@ -196,31 +192,41 @@ def search_brave(query: str, count=5) -> list[dict]:
             {"title": i.get("title") or "", "url": i.get("url") or "", "description": i.get("description") or ""}
             for i in r.json().get("web", {}).get("results", [])
         ]
-    try:
-        return retry(_req, tries=3, base=5)
-    except Exception as e:
-        print(f"  [Brave失败] {query}: {e}")
-        return []
+    # 信号量限制：同时最多 3 个 Brave 请求，避免 12 并发触发 429
+    with _brave_sem:
+        try:
+            return retry(_req, tries=3, base=5)
+        except Exception as e:
+            print(f"  [Brave失败] {query}: {e}")
+            return []
 
-# ── 数据源 2：Reddit ──────────────────────────────────────────
+# ── 数据源 2：Reddit RSS（JSON API 被 GitHub Actions IP 封锁，改用 RSS 端点）
 def search_reddit(subreddit: str, count=5) -> list[dict]:
     try:
         r = requests.get(
-            f"https://www.reddit.com/r/{subreddit}/hot.json",
-            headers={"User-Agent": "LongevityDailyBot/1.0"},
+            f"https://www.reddit.com/r/{subreddit}/hot.rss",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; LongevityDailyBot/2.0)"},
             params={"limit": count + 3},
             timeout=15,
         )
         r.raise_for_status()
-        posts = r.json().get("data", {}).get("children", [])
-        return [
-            {
-                "title": p["data"].get("title") or "",
-                "url": p["data"].get("url") or f"https://reddit.com{p['data'].get('permalink','')}",
-                "description": (p["data"].get("selftext") or "").strip()[:200] or p["data"].get("title", ""),
-            }
-            for p in posts if not p["data"].get("stickied")
-        ][:count]
+        # Reddit RSS 是标准 RSS 2.0，复用 search_rss 里的 XML 解析逻辑
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link  = (item.findtext("link") or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            # Reddit description 是 HTML，取纯文本摘要
+            import re
+            desc_text = re.sub(r"<[^>]+>", "", desc)[:200].strip()
+            if title and link:
+                items.append({
+                    "title": title,
+                    "url": link,
+                    "description": desc_text or title,
+                })
+        return items[:count]
     except Exception as e:
         print(f"  [Reddit失败] r/{subreddit}: {e}")
         return []
